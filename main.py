@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import time
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -194,6 +195,11 @@ class Main(Star):
     _STATUS_BADGE_DIR = _PLUGIN_ROOT / "assets" / "status"
     _DEFAULT_USER_AVATAR_PATH = _PLUGIN_ROOT / "assets" / "default_user_avatar.png"
     _PREDATOR_TEMPLATE_PATH = _PLUGIN_ROOT / "assets" / "predator_template.png"
+    _STEAM_PROFILE_URL_RE = re.compile(
+        r"(?:https?://)?(?:www\.)?steamcommunity\.com/profiles/(\d{17})",
+        re.IGNORECASE,
+    )
+    _STEAM_RAW_ID_RE = re.compile(r"^7656119\d{10}$")
     _MAP_CARD_SIZE = (900, 320)
     _MAP_CURRENT_HEIGHT = 212
     _MAP_IMAGE_CACHE_TTL_SECONDS = 60
@@ -282,6 +288,7 @@ class Main(Star):
         "apex绑定",
         "apex绑定列表",
         "apex解绑",
+        "apex昵称",
         "apex取消别名",
         "取消绑定",
         "解除绑定",
@@ -585,22 +592,30 @@ class Main(Star):
         return self._parse_player_aliases(value)
 
     @classmethod
-    def _normalize_user_bindings(cls, value) -> dict[str, str]:
+    def _normalize_user_bindings(cls, value) -> dict[str, str | dict]:
         if not isinstance(value, dict):
             return {}
-        bindings: dict[str, str] = {}
+        bindings: dict[str, str | dict] = {}
         for raw_user_id, raw_target in value.items():
             user_id = str(raw_user_id or "").strip()
             if isinstance(raw_target, dict):
-                raw_target = (
-                    raw_target.get("target")
-                    or raw_target.get("value")
-                    or raw_target.get("player")
-                    or ""
-                )
-            target = cls._normalize_binding_target(raw_target)
-            if user_id and target:
-                bindings[user_id] = target
+                target_str = str(raw_target.get("target", "") or "").strip()
+                nickname = str(raw_target.get("nickname", "") or "").strip()
+                steam_id = str(raw_target.get("steam_id", "") or "").strip()
+                steam_name = str(raw_target.get("steam_name", "") or "").strip()
+                if user_id and target_str:
+                    entry: dict = {"target": cls._normalize_binding_target(target_str)}
+                    if nickname:
+                        entry["nickname"] = nickname
+                    if steam_id:
+                        entry["steam_id"] = steam_id
+                    if steam_name:
+                        entry["steam_name"] = steam_name
+                    bindings[user_id] = entry
+            else:
+                target = cls._normalize_binding_target(raw_target)
+                if user_id and target:
+                    bindings[user_id] = target
         return bindings
 
     def _get_config_player_aliases(self) -> dict[str, str]:
@@ -1061,7 +1076,7 @@ class Main(Star):
         return resolved.player_name, resolved.platform
 
     def _resolve_player_alias_info(
-        self, player_name: str, platform: str
+        self, player_name: str, platform: str, event: AstrMessageEvent | None = None
     ) -> PlayerAliasResolution:
         if not self._aliases_enabled():
             return PlayerAliasResolution(player_name, player_name, platform)
@@ -1069,18 +1084,68 @@ class Main(Star):
         if not alias_key:
             return PlayerAliasResolution(player_name, player_name, platform)
         target = self._get_player_aliases().get(alias_key)
+        if target:
+            resolved_name, alias_platform = self._parse_alias_target_platform(target)
+            display_names = self._get_player_alias_display_names()
+            return PlayerAliasResolution(
+                requested_name=player_name,
+                player_name=resolved_name or player_name,
+                platform=platform or alias_platform,
+                alias_key=alias_key,
+                alias_display=display_names.get(alias_key, str(player_name or "").strip()),
+                alias_target=target,
+            )
+        # 全局别名未命中 → 检查当前用户的绑定昵称
+        if event is not None:
+            nick_result = self._resolve_binding_nickname(event, alias_key)
+            if nick_result is not None:
+                return nick_result
+        return PlayerAliasResolution(player_name, player_name, platform)
+
+    def _resolve_binding_nickname(
+        self, event: AstrMessageEvent, alias_key: str
+    ) -> PlayerAliasResolution | None:
+        """检查当前用户的绑定昵称是否匹配，匹配则返回解析结果。"""
+        user_id = self._get_user_id(event)
+        if not user_id:
+            return None
+        binding = getattr(self, "_runtime_user_bindings", {}).get(user_id, "")
+        nickname = self._get_binding_nickname(binding)
+        if not nickname or self._normalize_alias_key(nickname) != alias_key:
+            return None
+        target = self._get_binding_target(binding)
         if not target:
-            return PlayerAliasResolution(player_name, player_name, platform)
+            return None
         resolved_name, alias_platform = self._parse_alias_target_platform(target)
-        display_names = self._get_player_alias_display_names()
         return PlayerAliasResolution(
-            requested_name=player_name,
-            player_name=resolved_name or player_name,
-            platform=platform or alias_platform,
-            alias_key=alias_key,
-            alias_display=display_names.get(alias_key, str(player_name or "").strip()),
+            requested_name=alias_key,
+            player_name=resolved_name,
+            platform=alias_platform,
+            alias_key=f"nickname:{user_id}",
+            alias_display=nickname,
             alias_target=target,
         )
+
+    @staticmethod
+    def _get_binding_target(binding_value) -> str:
+        """从绑定数据（旧字符串格式或新 dict 格式）中提取目标字符串。"""
+        if isinstance(binding_value, dict):
+            return str(binding_value.get("target", "") or "").strip()
+        return str(binding_value or "").strip()
+
+    @staticmethod
+    def _get_binding_nickname(binding_value) -> str:
+        """从绑定数据中提取昵称（仅 dict 格式有）。"""
+        if isinstance(binding_value, dict):
+            return str(binding_value.get("nickname", "") or "").strip()
+        return ""
+
+    @staticmethod
+    def _get_binding_steam_id(binding_value) -> str:
+        """从绑定数据中提取 Steam ID（仅 dict 格式有）。"""
+        if isinstance(binding_value, dict):
+            return str(binding_value.get("steam_id", "") or "").strip()
+        return ""
 
     def _resolve_user_binding_info(
         self, event: AstrMessageEvent, platform: str
@@ -1088,7 +1153,8 @@ class Main(Star):
         if not self._aliases_enabled():
             return PlayerAliasResolution("", "", platform)
         user_id = self._get_user_id(event)
-        target = getattr(self, "_runtime_user_bindings", {}).get(user_id, "")
+        binding = getattr(self, "_runtime_user_bindings", {}).get(user_id, "")
+        target = self._get_binding_target(binding)
         if not user_id or not target:
             return PlayerAliasResolution("", "", platform)
         resolved_name, alias_platform = self._parse_alias_target_platform(target)
@@ -1357,14 +1423,94 @@ class Main(Star):
             logger.error(f"发送群图片失败: {exc}")
             return False
 
+    @staticmethod
+    def _extract_steam_id(text: str) -> str | None:
+        """从 Steam 个人资料 URL 或原始 SteamID64 中提取 17 位 Steam ID。
+
+        支持格式：
+            https://steamcommunity.com/profiles/76561199382991896
+            steamcommunity.com/profiles/76561199382991896
+            76561199382991896（原始 17 位 SteamID64）
+        """
+        if not text or not text.strip():
+            return None
+        text = text.strip()
+        m = Main._STEAM_PROFILE_URL_RE.search(text)
+        if m:
+            return m.group(1)
+        if Main._STEAM_RAW_ID_RE.match(text):
+            return text
+        return None
+
     def _parse_identifier(self, player_name: str) -> tuple[str, bool]:
         name = player_name.strip()
         lowered = name.lower()
+        steam_id = self._extract_steam_id(name)
+        if steam_id:
+            return steam_id, True
         if lowered.startswith("uid:"):
             return name[4:].strip(), True
         if lowered.startswith("uuid:"):
             return name[5:].strip(), True
+        if lowered.startswith("steam:"):
+            steam_id = self._extract_steam_id(name[6:].strip())
+            if steam_id:
+                return steam_id, True
         return name, False
+
+    # ---------- Steam 头像 ----------
+
+    def _avatars_dir(self) -> Path:
+        data_dir = getattr(self, "_data_dir", None)
+        if data_dir is None:
+            return self._PLUGIN_ROOT / "_generated" / "avatars"
+        return Path(data_dir) / "avatars"
+
+    def _steam_avatar_cache_path(self, steam_id: str) -> Path:
+        return self._avatars_dir() / f"{steam_id}.png"
+
+    async def _fetch_and_apply_steam_profile(
+        self, player_data: ApexPlayerStats
+    ) -> None:
+        """如果 player_data 的 uid 是 SteamID64，则获取 Steam 头像和昵称。"""
+        steam_id = self._extract_steam_id(player_data.uid)
+        if not steam_id:
+            return
+        profile = await self._api.fetch_steam_profile(steam_id)
+        if not profile:
+            return
+        steam_name = profile.get("steam_name", "")
+        avatar_url = profile.get("avatar_url", "")
+        if steam_name and not player_data.steam_name:
+            player_data.steam_name = steam_name
+        if avatar_url and not player_data.avatar_path:
+            try:
+                player_data.avatar_path = await asyncio.to_thread(
+                    self._download_steam_avatar, steam_id, avatar_url
+                )
+            except Exception:
+                pass
+
+    def _download_steam_avatar(self, steam_id: str, avatar_url: str) -> str:
+        """同步下载 Steam 头像到本地缓存，返回缓存路径。失败返回空字符串。"""
+        cache_path = self._steam_avatar_cache_path(steam_id)
+        if cache_path.exists():
+            return str(cache_path)
+        try:
+            avatar_dir = cache_path.parent
+            avatar_dir.mkdir(parents=True, exist_ok=True)
+            with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+                response = client.get(avatar_url)
+                response.raise_for_status()
+            tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+            tmp_path.write_bytes(response.content)
+            tmp_path.replace(cache_path)
+            return str(cache_path)
+        except Exception as exc:
+            logger.debug(f"下载 Steam 头像失败 (steam_id={steam_id}): {exc}")
+            if tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
+            return ""
 
     def _build_player_key(self, lookup_id: str, platform: str, use_uid: bool) -> str:
         base = lookup_id.strip().lower()
@@ -1644,19 +1790,19 @@ class Main(Star):
 
         requested_player_name, platform = self._parse_player_platform(event, player_name, platform)
         if requested_player_name:
-            alias_info = self._resolve_player_alias_info(requested_player_name, platform)
+            alias_info = self._resolve_player_alias_info(requested_player_name, platform, event)
         else:
             alias_info = self._resolve_user_binding_info(event, platform)
         player_name, platform = alias_info.player_name, alias_info.platform
         if not player_name:
-            yield self._plain(event, 
+            yield self._plain(event,
                 "\n".join([self._time_line(), "⚠️ 请提供玩家名称，例如: /apexrank PlayerName"])
             )
             return
 
         blocked_name = self._blocked_lookup_name(requested_player_name, player_name)
         if blocked_name:
-            yield self._plain(event, 
+            yield self._plain(event,
                 "\n".join(
                     [
                         self._time_line(),
@@ -1714,6 +1860,7 @@ class Main(Star):
 
         player_data.platform = used_platform
         self._apply_alias_to_player_data(player_data, alias_info)
+        await self._fetch_and_apply_steam_profile(player_data)
         if self._is_text_output_mode():
             yield self._plain(event, self._format_player_rank_text(player_data))
             return
@@ -2053,10 +2200,10 @@ class Main(Star):
             return
 
         requested_player_name, platform = self._parse_player_platform(event, player_name, platform)
-        alias_info = self._resolve_player_alias_info(requested_player_name, platform)
+        alias_info = self._resolve_player_alias_info(requested_player_name, platform, event)
         player_name, platform = alias_info.player_name, alias_info.platform
         if not player_name:
-            yield self._plain(event, 
+            yield self._plain(event,
                 "\n".join(
                     [self._time_line(), "⚠️ 请提供要监控的玩家名称，例如: /apexrankwatch PlayerName"]
                 )
@@ -2307,7 +2454,7 @@ class Main(Star):
             return
 
         player_name, platform = self._parse_player_platform(event, player_name, platform)
-        alias_info = self._resolve_player_alias_info(player_name, platform)
+        alias_info = self._resolve_player_alias_info(player_name, platform, event)
         player_name, platform = alias_info.player_name, alias_info.platform
         display_name = self._display_name_with_alias(
             alias_info.alias_display if alias_info.matched else "",
@@ -2710,10 +2857,13 @@ class Main(Star):
 
         if not raw_target:
             current = bindings.get(user_id, "")
-            if current:
+            target_display = self._get_binding_target(current) or str(current or "")
+            nickname = self._get_binding_nickname(current)
+            if target_display:
+                nick_info = f"（昵称：{nickname}）" if nickname else ""
                 yield self._plain(
                     event,
-                    "\n".join([self._time_line(), f"🔖 你的 Apex 查询绑定：{current}"]),
+                    "\n".join([self._time_line(), f"🔖 你的 Apex 查询绑定：{target_display} {nick_info}".strip()]),
                 )
             else:
                 yield self._plain(
@@ -2722,16 +2872,17 @@ class Main(Star):
                         [
                             self._time_line(),
                             "ℹ️ 你还没有绑定 Apex 查询目标",
-                            "用法：/apex绑定 <玩家名|uid:...> [平台]",
+                            "用法：/apex绑定 <玩家名|uid:...|Steam链接> [平台]",
                             "例：/apex绑定 uid:1234  或  /apex绑定 PlayerName pc",
+                            "也可粘贴 Steam 个人资料链接自动识别",
                         ]
                     ),
                 )
             return
 
         normalized_target = self._normalize_binding_target(raw_target)
-        identifier_text, _ = self._parse_alias_target_platform(normalized_target)
-        identifier, _ = self._parse_identifier(identifier_text)
+        identifier_text, binding_platform = self._parse_alias_target_platform(normalized_target)
+        identifier, use_uid = self._parse_identifier(identifier_text)
         if not identifier:
             yield self._plain(
                 event,
@@ -2739,16 +2890,34 @@ class Main(Star):
             )
             return
 
-        bindings[user_id] = normalized_target
+        # 构建绑定数据（dict 格式，支持昵称）
+        binding_entry: dict = {"target": normalized_target}
+        steam_id = self._extract_steam_id(identifier) if use_uid else ""
+        if steam_id:
+            binding_entry["steam_id"] = steam_id
+            binding_entry["nickname"] = ""  # 稍后由 /apex昵称 设置或自动填充
+            # 尝试获取 Steam 显示名作为默认昵称
+            try:
+                profile = await self._api.fetch_steam_profile(steam_id)
+                steam_name = profile.get("steam_name", "")
+                if steam_name:
+                    binding_entry["steam_name"] = steam_name
+                    binding_entry["nickname"] = steam_name
+            except Exception:
+                pass
+
+        bindings[user_id] = binding_entry
         self._runtime_user_bindings = bindings
         self._save_settings()
+        nick_msg = f"（昵称：{binding_entry.get('nickname', '')}）" if binding_entry.get("nickname") else ""
         yield self._plain(
             event,
             "\n".join(
                 [
                     self._time_line(),
-                    f"✅ 已绑定你的 Apex 查询目标：{normalized_target}",
+                    f"✅ 已绑定你的 Apex 查询目标：{normalized_target} {nick_msg}".strip(),
                     "之后直接发送 /apex查询 即可查询该玩家",
+                    "使用 /apex昵称 <名称> 可自定义查询昵称",
                 ]
             ),
         )
@@ -2779,6 +2948,97 @@ class Main(Star):
             return
 
         yield self._remove_current_user_binding_response(event)
+
+    @filter.command("apex昵称")
+    async def apexnickname(self, event: AstrMessageEvent, nickname: str = ""):
+        """设置当前用户绑定的查询昵称，之后可直接用昵称查询。"""
+        deny = self._guard_access(event)
+        if deny:
+            yield self._plain(event, "\n".join([self._time_line(), deny]))
+            return
+        if not self._aliases_enabled():
+            yield self._plain(event, "\n".join([self._time_line(), "⚠️ 别名功能已关闭"]))
+            return
+
+        user_id = self._get_user_id(event)
+        if not user_id:
+            yield self._plain(event, "\n".join([self._time_line(), "⚠️ 无法识别当前用户"]))
+            return
+
+        bindings = dict(getattr(self, "_runtime_user_bindings", {}))
+        binding = bindings.get(user_id, "")
+        target = self._get_binding_target(binding)
+        if not target:
+            yield self._plain(
+                event,
+                "\n".join(
+                    [
+                        self._time_line(),
+                        "⚠️ 你还没有绑定 Apex 查询目标",
+                        "请先使用 /apex绑定 <玩家|uid:...|Steam链接> 进行绑定",
+                    ]
+                ),
+            )
+            return
+
+        raw_nick = (self._extract_command_args(event) or str(nickname or "")).strip()
+        if not raw_nick:
+            current_nick = self._get_binding_nickname(binding)
+            if current_nick:
+                yield self._plain(
+                    event,
+                    "\n".join([self._time_line(), f"🔖 你的当前查询昵称：{current_nick}"]),
+                )
+            else:
+                yield self._plain(
+                    event,
+                    "\n".join(
+                        [
+                            self._time_line(),
+                            "ℹ️ 你还没有设置查询昵称",
+                            "用法：/apex昵称 <名称>  例：/apex昵称 老王",
+                            "设置后可直接用 /apexrank 老王 查询",
+                        ]
+                    ),
+                )
+            return
+
+        if raw_nick.lower() in {"清除", "删除", "移除", "clear", "remove", "del"}:
+            if isinstance(binding, dict):
+                binding.pop("nickname", None)
+                bindings[user_id] = binding
+                self._runtime_user_bindings = bindings
+                self._save_settings()
+            yield self._plain(
+                event,
+                "\n".join([self._time_line(), "✅ 已清除你的查询昵称"]),
+            )
+            return
+
+        if len(raw_nick) > 32:
+            yield self._plain(
+                event,
+                "\n".join([self._time_line(), "⚠️ 昵称过长，请控制在 32 字以内"]),
+            )
+            return
+
+        if isinstance(binding, dict):
+            binding["nickname"] = raw_nick
+        else:
+            binding = {"target": str(binding), "nickname": raw_nick}
+        bindings[user_id] = binding
+        self._runtime_user_bindings = bindings
+        self._save_settings()
+        yield self._plain(
+            event,
+            "\n".join(
+                [
+                    self._time_line(),
+                    f"✅ 已设置你的查询昵称为：{raw_nick}",
+                    f"之后直接输入 /apexrank {raw_nick} 即可查询",
+                ]
+            ),
+        )
 
     @filter.command("apex监控")
     async def apexrankwatch_cn(self, event: AstrMessageEvent, player_name: str = "", platform: str = ""):
@@ -3191,14 +3451,16 @@ class Main(Star):
             "📋 Apex Rank Watch 帮助（/apexhelp 或 /apex帮助）",
             "——",
             "【查询】",
-            "🔎 /apexrank <玩家|uid:...> [平台]  别名：/apex查询 /视奸",
-            "🔖 /apex绑定 <玩家|uid:...> [平台]  绑定后 /apex查询 可直接查自己",
+            "🔎 /apexrank <玩家|uid:...|Steam链接> [平台]  别名：/apex查询 /视奸",
+            "🔖 /apex绑定 <玩家|uid:...|Steam链接> [平台]  绑定后 /apex查询 可直接查自己",
+            "🔖 /apex昵称 [名称]  为绑定设置查询昵称，之后可用昵称代替 uid",
             "🔖 /apex绑定 list / /apex绑定列表 / /apex解绑  查看或取消个人绑定",
             "例：/apexrank PlayerName pc",
+            "例：/apexrank 76561199382991896 pc  （SteamID64 原始数字）",
             "——",
             "【监控（群聊）】",
-            "➕ /apexrankwatch <玩家|uid:...> [平台]  别名：/apex监控 /持续视奸",
-            "📝 /apexrankrecord <玩家|uid:...> [平台]  别名：/持续记录，只记录不通报",
+            "➕ /apexrankwatch <玩家|uid:...|Steam链接> [平台]  别名：/apex监控 /持续视奸",
+            "📝 /apexrankrecord <玩家|uid:...|Steam链接> [平台]  别名：/持续记录，只记录不通报",
             "📋 /apexranklist  别名：/apex列表 /持续视奸列表",
             "📈 /分数变化 [玩家|uid:...] [平台] [场次]  生成高清长图，最多 50 次",
             "➖ /apexrankremove <玩家|uid:...> [平台]  别名：/apex移除 /取消持续视奸",
@@ -3221,7 +3483,7 @@ class Main(Star):
             "——",
             "【参数】",
             "平台：PC / PS4 / X1 / SWITCH（默认 PC；PC 无数据自动尝试其他平台）",
-            "UUID：使用 uid: 或 uuid: 前缀（例：/apexrank uid:000000）",
+            "UID/Steam：使用 uid: 前缀、SteamID64 或 Steam 个人资料链接均可",
             "分数变化：默认最近 20 次有效变化，可填写 1-50 次；/持续记录 只记录不通报",
             "——",
             f"⏱️ 监控间隔：{getattr(self._config, 'check_interval', 2)} 分钟",
@@ -4671,7 +4933,11 @@ class Main(Star):
         self._draw_rank_panel_base(draw, box, fill=(13, 16, 21, 240), outline_alpha=105)
         avatar_box = (box[0] + 38, box[1] + 48, box[0] + 192, box[1] + 202)
         self._draw_icon_octagon(draw, avatar_box)
-        if self._DEFAULT_USER_AVATAR_PATH.exists():
+        # 优先使用 Steam 头像，fallback 到默认头像
+        avatar_path = getattr(player_data, "avatar_path", "") or ""
+        if avatar_path and Path(avatar_path).exists():
+            self._draw_image_asset(draw, Path(avatar_path), avatar_box, clip_octagon=True)
+        elif self._DEFAULT_USER_AVATAR_PATH.exists():
             self._draw_image_asset(draw, self._DEFAULT_USER_AVATAR_PATH, avatar_box, clip_octagon=True)
         else:
             self._draw_rank_icon(draw, "player", avatar_box)

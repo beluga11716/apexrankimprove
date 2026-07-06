@@ -1374,8 +1374,8 @@ def test_apexbind_stores_user_binding_with_uid_slash_prefix(monkeypatch):
 
     result = asyncio.run(collect())
 
-    assert plugin._runtime_user_bindings == {"10001": "uid:1007669673322"}
-    assert save_calls == [{"10001": "uid:1007669673322"}]
+    assert plugin._runtime_user_bindings == {"10001": {"target": "uid:1007669673322"}}
+    assert save_calls == [{"10001": {"target": "uid:1007669673322"}}]
     assert "已绑定" in result[0][1]
     assert "uid:1007669673322" in result[0][1]
 

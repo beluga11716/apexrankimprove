@@ -10,6 +10,7 @@ from html import unescape
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
+from xml.etree import ElementTree
 
 import httpx
 
@@ -180,6 +181,8 @@ class ApexPlayerStats:
     current_state: str
     is_in_lobby_or_match: bool
     platform: str
+    steam_name: str = ""
+    avatar_path: str = ""
 
 
 @dataclass
@@ -597,6 +600,32 @@ class ApexApiClient:
             except PlayerNotFoundError:
                 continue
         raise PlayerNotFoundError(f"Player not found: {identifier}")
+
+    async def fetch_steam_profile(self, steam_id: str) -> dict[str, str]:
+        """从 Steam 公开 XML 端点获取玩家昵称和头像 URL。
+
+        无需 Steam API Key，使用公开的 ?xml=1 端点。
+        返回 {"steam_name": "...", "avatar_url": "..."}，失败返回空 dict。
+        """
+        url = f"https://steamcommunity.com/profiles/{steam_id}/?xml=1"
+        try:
+            response = await self._client.get(url)
+            response.raise_for_status()
+            root = ElementTree.fromstring(response.text)
+            steam_name = ""
+            avatar_url = ""
+            for child in root:
+                tag = child.tag.lower()
+                if tag == "steamid" and child.text:
+                    steam_name = child.text.strip()
+                elif tag == "avatarfull" and child.text:
+                    avatar_url = child.text.strip()
+            if steam_name or avatar_url:
+                return {"steam_name": steam_name, "avatar_url": avatar_url}
+            return {}
+        except Exception as exc:
+            self._logger.debug(f"获取 Steam 资料失败 (steam_id={steam_id}): {exc}")
+            return {}
 
     async def fetch_season_info(self, season_number: int | None = None) -> SeasonInfo:
         if season_number is None:
