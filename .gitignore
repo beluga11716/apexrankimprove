@@ -23,3 +23,6 @@ map_cards/
 predator_cards/
 *.zip
 *.log
+CLAUDE.md
+.claude/
+.memory/
