@@ -1,13 +1,21 @@
 name: astrbot_plugin_apexrankwatch
 display_name: Apex Rank Watch
-version: 2.4.1
-author: moeneri
-short_desc: 查询 APEX 段位、地图、赛季、猎杀线，支持监控、持续记录、分数变化图、全局别名和个人绑定。
+version: 2.5.0
+author: moeneri (改进: beluga11716)
+short_desc: 查询 APEX 段位、地图、赛季、猎杀线，支持 Steam 链接识别、自定义头像、监控、持续记录、分数变化图。
 description: |-
   支持查询 APEX 玩家段位、地图轮换时间、赛季时间和猎杀线，持续监控玩家段位变化并通知，也可持续记录分数变化只记录不通报，并生成最近最多 50 次变化的高清长图。
 
+  v2.5 新增：
+  - Steam 链接/SteamID64 自动识别为 UID（粘贴 Steam 主页链接即可查询）
+  - Steam 头像自动获取（通过 Steam 公开 XML API，无需额外 Key）
+  - 绑定后自动获取 Steam 显示名作为查询昵称
+  - /apex昵称 命令：设置/查看/清除自定义昵称
+  - /apex头像 命令：发送图片设置自定义头像
+  - 内置中文字体，开箱即用，无需下载
+
   插件行为：
-  - 玩家查询：输出段位、RP、等级、在线状态和当前英雄，可用玩家名、uid:、uuid:、全局别名或个人绑定查询。
+  - 玩家查询：输出段位、RP、等级、在线状态和当前英雄，可用玩家名、uid:、uuid:、Steam链接、SteamID64、全局别名或个人绑定查询。
   - 群内监控与记录：/持续视奸 会记录并主动通报排位分变化，/持续记录 只记录不通报，两者都会进入统计列表。
   - 分数变化图：/分数变化 可查看本群统计玩家最近分数变化，默认 20 次，最多 50 次。
   - 地图与赛季：查询排位地图、全天地图排期、匹配地图、赛季结束时间和猎杀线。
@@ -19,9 +27,10 @@ description: |-
   - 监控：/apexrankwatch <玩家名|uid:...> [平台]、/持续记录 <玩家名|uid:...> [平台]、/apexrankrecord、/apexranklist、/持续视奸列表、/分数变化 [玩家名|uid:...] [平台] [场次]、/apexrankremove <玩家名|uid:...> [平台]
   - 信息：/map、/全天地图、/匹配地图、/apexseason、/apexpredator [平台]、/猎杀
   - 别名：/apexalias add <别名> <玩家名|uid:...> [平台]、/apexalias list、/apexalias remove <别名>、/apex取消别名 <别名>
-  - 绑定：/apex绑定 <玩家名|uid:...> [平台]、/apex绑定 list、/apex绑定列表、/apex绑定 remove、/apex解绑
+  - 绑定：/apex绑定 <玩家名|uid:...|Steam链接> [平台]、/apex绑定 list、/apex绑定列表、/apex绑定 remove、/apex解绑、/apex昵称 [名称]
+  - 头像：/apex头像 [附带图片]、/apex头像 清除
   - 管理：/apexblacklist <add|remove|list|clear> <玩家ID>、/赛季关闭、/赛季开启、/apex_download
-repo: https://github.com/moeneri/astrbot_plugin_apexrankwatch
+repo: https://github.com/beluga11716/apexrankimprove
 license: MIT
 astrbot_version: ">=4.16,<5"
 support_platforms: []
