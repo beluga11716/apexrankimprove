@@ -132,6 +132,7 @@ def test_cjk_font_download_is_cached_and_verified(tmp_path, monkeypatch):
     monkeypatch.setattr(main_module.Main, "_FONT_FILE_NAME", "font.otf")
     monkeypatch.setattr(main_module.Main, "_FONT_SHA256", digest)
     monkeypatch.setattr(main_module.httpx, "get", fake_get)
+    monkeypatch.setattr(plugin, "_resolve_bundled_cjk_font_path", lambda: None)
 
     first = plugin._download_cjk_font_if_needed()
     second = plugin._download_cjk_font_if_needed()
@@ -153,6 +154,7 @@ def test_cjk_font_status_reports_missing_when_system_and_cache_absent(tmp_path, 
     plugin._data_dir = tmp_path
 
     monkeypatch.setattr(plugin, "_candidate_system_cjk_font_paths", lambda bold=False: [])
+    monkeypatch.setattr(plugin, "_resolve_bundled_cjk_font_path", lambda: None)
 
     status = plugin._get_cjk_font_status()
 
@@ -207,6 +209,7 @@ def test_manual_font_download_can_retry_after_auto_attempt(tmp_path, monkeypatch
     monkeypatch.setattr(main_module.Main, "_FONT_FILE_NAME", "font.otf")
     monkeypatch.setattr(main_module.Main, "_FONT_SHA256", digest)
     monkeypatch.setattr(main_module.httpx, "get", fake_get)
+    monkeypatch.setattr(plugin, "_resolve_bundled_cjk_font_path", lambda: None)
 
     assert plugin._download_cjk_font_if_needed() is None
     assert plugin._download_cjk_font_if_needed(force=True) == tmp_path / "fonts" / "font.otf"

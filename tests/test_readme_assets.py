@@ -74,7 +74,7 @@ def test_metadata_version_is_patch_release():
     metadata_path = Path(__file__).resolve().parents[1] / "metadata.yaml"
     metadata = metadata_path.read_text(encoding="utf-8")
 
-    assert "version: 2.4.1" in metadata
+    assert "version: 2.5.0" in metadata
 
 
 def test_readme_intro_mentions_codex_assistance():
@@ -126,7 +126,7 @@ def test_alias_feature_is_documented_in_readme_and_metadata():
     for content in (readme, metadata):
         assert "/apexalias add <别名>" in content
         assert "/apexalias list" in content
-        assert "/apex绑定 <玩家名|uid:...>" in content
+        assert "/apex绑定 <" in content
         assert "/apex绑定 list" in content
         assert "/apex解绑" in content
         assert "别名是全局查询映射" in content

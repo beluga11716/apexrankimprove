@@ -1482,21 +1482,51 @@ class Main(Star):
     def _steam_avatar_cache_path(self, steam_id: str) -> Path:
         return self._avatars_dir() / f"{steam_id}.png"
 
-    def _custom_avatar_cache_path(self, user_id: str) -> Path:
-        """用户自定义头像缓存路径（per-user）。"""
-        safe = re.sub(r"[^a-zA-Z0-9_-]", "_", str(user_id).strip())
+    def _custom_avatar_cache_path(self, binding_identifier: str) -> Path:
+        """自定义头像缓存路径（per-binding，基于绑定目标标识符）。"""
+        safe = re.sub(r"[^a-zA-Z0-9_-]", "_", str(binding_identifier).strip())
         return self._avatars_dir() / f"custom_{safe}.png"
+
+    @staticmethod
+    def _player_matches_binding_target(
+        player_data: ApexPlayerStats, binding_id: str, binding_platform: str
+    ) -> bool:
+        """检查查询到的玩家是否匹配绑定目标。"""
+        if not binding_id:
+            return False
+        pid = binding_id.strip().lower()
+        # 平台不匹配则直接返回 False
+        if binding_platform and player_data.platform.lower() != binding_platform.lower():
+            return False
+        # 比较 UID（最可靠，SteamID64 绑定走这条）
+        if player_data.uid and player_data.uid.lower() == pid:
+            return True
+        # 比较玩家名（名字绑定的情况）
+        if player_data.name and player_data.name.lower() == pid:
+            return True
+        return False
 
     def _apply_custom_binding_avatar(
         self, event: AstrMessageEvent, player_data: ApexPlayerStats
     ) -> None:
-        """如果当前用户绑定了自定义头像，优先使用它。"""
+        """仅当查询目标匹配用户绑定时才应用自定义头像。"""
         if not self._aliases_enabled():
             return
         user_id = self._get_user_id(event)
         if not user_id:
             return
         binding = getattr(self, "_runtime_user_bindings", {}).get(user_id, "")
+        target = self._get_binding_target(binding)
+        if not target:
+            return
+        # 解析绑定目标 → 提取 identifier 和 platform
+        identifier, binding_platform = self._parse_alias_target_platform(target)
+        if not identifier:
+            return
+        binding_id, _ = self._parse_identifier(identifier)
+        # 仅当查询到的玩家匹配绑定时才显示自定义头像
+        if not self._player_matches_binding_target(player_data, binding_id, binding_platform):
+            return
         avatar_path = self._get_binding_avatar(binding)
         if avatar_path and Path(avatar_path).exists():
             player_data.avatar_path = avatar_path
@@ -3078,7 +3108,7 @@ class Main(Star):
 
     @filter.command("apex头像", alias={"apexavatar"})
     async def apexavatar(self, event: AstrMessageEvent):
-        """为当前用户绑定设置自定义头像。发送指令时需附带一张图片。"""
+        """为绑定设置自定义头像：/apex头像 [昵称|uid:...] + 附带图片。支持昵称或 UID 指定绑定，头像绑定到具体 UID，查询其他玩家时不会显示。"""
         deny = self._guard_access(event)
         if deny:
             yield self._plain(event, "\n".join([self._time_line(), deny]))
@@ -3108,15 +3138,71 @@ class Main(Star):
             )
             return
 
+        # 解析参数：/apex头像 [昵称] [清除]
         raw_args = (self._extract_command_args(event) or "").strip()
-        if raw_args.lower() in {"清除", "删除", "移除", "clear", "remove", "del"}:
+        action_clear = False
+        nickname_arg = ""
+
+        if raw_args:
+            parts = raw_args.split()
+            if parts[-1].lower() in {"清除", "删除", "移除", "clear", "remove", "del"}:
+                action_clear = True
+                nickname_arg = " ".join(parts[:-1]).strip()
+            else:
+                nickname_arg = raw_args
+
+        # 从绑定 target 提取标识符，用作头像缓存 key
+        identifier, binding_platform = self._parse_alias_target_platform(target)
+        binding_id, _ = self._parse_identifier(identifier)
+
+        # 验证参数是否匹配当前绑定（支持昵称和 UID 两种方式）
+        if nickname_arg:
+            arg_id, arg_is_uid = self._parse_identifier(nickname_arg)
+            binding_nickname = self._get_binding_nickname(binding)
+
+            if arg_is_uid:
+                # UID 模式：比较 UID
+                if arg_id.lower() != binding_id.lower():
+                    yield self._plain(
+                        event,
+                        "\n".join(
+                            [
+                                self._time_line(),
+                                f"⚠️ UID「{nickname_arg}」与你的绑定不匹配",
+                                f"你当前绑定的 UID：{binding_id}",
+                                "用法：/apex头像 uid:你的UID + 附带图片",
+                            ]
+                        ),
+                    )
+                    return
+                binding_display = arg_id
+            else:
+                # 昵称模式：比较昵称
+                if self._normalize_alias_key(nickname_arg) != self._normalize_alias_key(binding_nickname):
+                    yield self._plain(
+                        event,
+                        "\n".join(
+                            [
+                                self._time_line(),
+                                f"⚠️ 昵称「{nickname_arg}」与你的绑定不匹配",
+                                f"你当前绑定的昵称是：{binding_nickname or '(未设置)'}",
+                                "用法：/apex头像 <昵称 或 uid:...> + 附带图片",
+                            ]
+                        ),
+                    )
+                    return
+                binding_display = nickname_arg
+        else:
+            binding_display = self._get_binding_nickname(binding) or binding_id
+
+        # 处理清除操作
+        if action_clear:
             if isinstance(binding, dict):
                 old_path = binding.pop("avatar_path", "")
                 binding.pop("avatar_path", None)
                 bindings[user_id] = binding
                 self._runtime_user_bindings = bindings
                 self._save_settings()
-                # 尝试删除旧头像文件
                 if old_path:
                     try:
                         Path(old_path).unlink(missing_ok=True)
@@ -3124,7 +3210,12 @@ class Main(Star):
                         pass
             yield self._plain(
                 event,
-                "\n".join([self._time_line(), "✅ 已清除你的自定义头像"]),
+                "\n".join(
+                    [
+                        self._time_line(),
+                        f"✅ 已清除「{binding_display}」的自定义头像",
+                    ]
+                ),
             )
             return
 
@@ -3137,7 +3228,12 @@ class Main(Star):
             if current_avatar:
                 yield self._plain(
                     event,
-                    "\n".join([self._time_line(), f"🖼️ 你的自定义头像：{current_avatar}"]),
+                    "\n".join(
+                        [
+                            self._time_line(),
+                            f"🖼️「{binding_display}」的自定义头像：{current_avatar}",
+                        ]
+                    ),
                 )
             else:
                 yield self._plain(
@@ -3145,16 +3241,18 @@ class Main(Star):
                     "\n".join(
                         [
                             self._time_line(),
-                            "ℹ️ 你还没有设置自定义头像",
-                            "用法：发送 /apex头像 并附带一张图片即可设置",
-                            "清除：/apex头像 清除",
+                            f"ℹ️「{binding_display}」还没有设置自定义头像",
+                            "用法：/apex头像 [昵称 或 uid:...] + 附带一张图片即可设置",
+                            "清除：/apex头像 [昵称 或 uid:...] 清除",
+                            "头像绑定到具体 UID，查询其他玩家不会显示",
                         ]
                     ),
                 )
             return
 
+        # 保存头像
         received_image = image_comps[0]
-        cache_path = self._custom_avatar_cache_path(user_id)
+        cache_path = self._custom_avatar_cache_path(binding_id)
         try:
             tmp_path = await received_image.convert_to_file_path()
             cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3171,13 +3269,13 @@ class Main(Star):
                 "\n".join(
                     [
                         self._time_line(),
-                        "✅ 已设置你的自定义头像",
-                        f"路径：{cache_path}",
+                        f"✅ 已为「{binding_display}」设置自定义头像",
+                        f"UID：{binding_id}",
                     ]
                 ),
             )
         except Exception as exc:
-            logger.warning(f"保存自定义头像失败 (user_id={user_id}): {exc}")
+            logger.warning(f"保存自定义头像失败 (user_id={user_id}, target={target}): {exc}")
             yield self._plain(
                 event,
                 "\n".join([self._time_line(), f"⚠️ 头像保存失败：{exc}"]),

@@ -11,7 +11,7 @@ description: |-
   - Steam 头像自动获取（通过 Steam 公开 XML API，无需额外 Key）
   - 绑定后自动获取 Steam 显示名作为查询昵称
   - /apex昵称 命令：设置/查看/清除自定义昵称
-  - /apex头像 命令：发送图片设置自定义头像
+  - /apex头像 命令：为绑定设置自定义头像（头像绑定到具体 UID，查询其他玩家不显示）
   - 内置中文字体，开箱即用，无需下载
 
   插件行为：
@@ -28,7 +28,7 @@ description: |-
   - 信息：/map、/全天地图、/匹配地图、/apexseason、/apexpredator [平台]、/猎杀
   - 别名：/apexalias add <别名> <玩家名|uid:...> [平台]、/apexalias list、/apexalias remove <别名>、/apex取消别名 <别名>
   - 绑定：/apex绑定 <玩家名|uid:...|Steam链接> [平台]、/apex绑定 list、/apex绑定列表、/apex绑定 remove、/apex解绑、/apex昵称 [名称]
-  - 头像：/apex头像 [附带图片]、/apex头像 清除
+  - 头像：/apex头像 [昵称|uid:...] + 图片、/apex头像 [昵称|uid:...] 清除、/apex头像 [昵称|uid:...]（查看）
   - 管理：/apexblacklist <add|remove|list|clear> <玩家ID>、/赛季关闭、/赛季开启、/apex_download
 repo: https://github.com/beluga11716/apexrankimprove
 license: MIT
