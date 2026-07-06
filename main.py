@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import re
+import shutil
 import time
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -229,6 +230,7 @@ class Main(Star):
     )
     _FONT_DOWNLOAD_TIMEOUT_SECONDS = 30
     _FONT_MAX_BYTES = 25 * 1024 * 1024
+    _FONT_BUNDLED_PATH = _PLUGIN_ROOT / "assets" / "fonts" / "NotoSansCJKsc-Regular.otf"
 
     _KEYWORD_COMMAND_BLOCKLIST = {
         # 英文指令
@@ -289,6 +291,7 @@ class Main(Star):
         "apex绑定列表",
         "apex解绑",
         "apex昵称",
+        "apex头像",
         "apex取消别名",
         "取消绑定",
         "解除绑定",
@@ -603,6 +606,7 @@ class Main(Star):
                 nickname = str(raw_target.get("nickname", "") or "").strip()
                 steam_id = str(raw_target.get("steam_id", "") or "").strip()
                 steam_name = str(raw_target.get("steam_name", "") or "").strip()
+                avatar_path = str(raw_target.get("avatar_path", "") or "").strip()
                 if user_id and target_str:
                     entry: dict = {"target": cls._normalize_binding_target(target_str)}
                     if nickname:
@@ -611,6 +615,8 @@ class Main(Star):
                         entry["steam_id"] = steam_id
                     if steam_name:
                         entry["steam_name"] = steam_name
+                    if avatar_path:
+                        entry["avatar_path"] = avatar_path
                     bindings[user_id] = entry
             else:
                 target = cls._normalize_binding_target(raw_target)
@@ -1147,6 +1153,13 @@ class Main(Star):
             return str(binding_value.get("steam_id", "") or "").strip()
         return ""
 
+    @staticmethod
+    def _get_binding_avatar(binding_value) -> str:
+        """从绑定数据中提取自定义头像路径（仅 dict 格式有）。"""
+        if isinstance(binding_value, dict):
+            return str(binding_value.get("avatar_path", "") or "").strip()
+        return ""
+
     def _resolve_user_binding_info(
         self, event: AstrMessageEvent, platform: str
     ) -> PlayerAliasResolution:
@@ -1469,6 +1482,25 @@ class Main(Star):
     def _steam_avatar_cache_path(self, steam_id: str) -> Path:
         return self._avatars_dir() / f"{steam_id}.png"
 
+    def _custom_avatar_cache_path(self, user_id: str) -> Path:
+        """用户自定义头像缓存路径（per-user）。"""
+        safe = re.sub(r"[^a-zA-Z0-9_-]", "_", str(user_id).strip())
+        return self._avatars_dir() / f"custom_{safe}.png"
+
+    def _apply_custom_binding_avatar(
+        self, event: AstrMessageEvent, player_data: ApexPlayerStats
+    ) -> None:
+        """如果当前用户绑定了自定义头像，优先使用它。"""
+        if not self._aliases_enabled():
+            return
+        user_id = self._get_user_id(event)
+        if not user_id:
+            return
+        binding = getattr(self, "_runtime_user_bindings", {}).get(user_id, "")
+        avatar_path = self._get_binding_avatar(binding)
+        if avatar_path and Path(avatar_path).exists():
+            player_data.avatar_path = avatar_path
+
     async def _fetch_and_apply_steam_profile(
         self, player_data: ApexPlayerStats
     ) -> None:
@@ -1488,28 +1520,31 @@ class Main(Star):
                 player_data.avatar_path = await asyncio.to_thread(
                     self._download_steam_avatar, steam_id, avatar_url
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(f"应用 Steam 头像失败 (steam_id={steam_id}): {exc}")
 
     def _download_steam_avatar(self, steam_id: str, avatar_url: str) -> str:
         """同步下载 Steam 头像到本地缓存，返回缓存路径。失败返回空字符串。"""
         cache_path = self._steam_avatar_cache_path(steam_id)
         if cache_path.exists():
             return str(cache_path)
+        tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
         try:
             avatar_dir = cache_path.parent
             avatar_dir.mkdir(parents=True, exist_ok=True)
             with httpx.Client(timeout=10.0, follow_redirects=True) as client:
                 response = client.get(avatar_url)
                 response.raise_for_status()
-            tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
             tmp_path.write_bytes(response.content)
             tmp_path.replace(cache_path)
             return str(cache_path)
         except Exception as exc:
-            logger.debug(f"下载 Steam 头像失败 (steam_id={steam_id}): {exc}")
-            if tmp_path.exists():
-                tmp_path.unlink(missing_ok=True)
+            logger.warning(f"下载 Steam 头像失败 (steam_id={steam_id}): {exc}")
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
             return ""
 
     def _build_player_key(self, lookup_id: str, platform: str, use_uid: bool) -> str:
@@ -1860,6 +1895,7 @@ class Main(Star):
 
         player_data.platform = used_platform
         self._apply_alias_to_player_data(player_data, alias_info)
+        self._apply_custom_binding_avatar(event, player_data)
         await self._fetch_and_apply_steam_profile(player_data)
         if self._is_text_output_mode():
             yield self._plain(event, self._format_player_rank_text(player_data))
@@ -3039,6 +3075,113 @@ class Main(Star):
                 ]
             ),
         )
+
+    @filter.command("apex头像", alias={"apexavatar"})
+    async def apexavatar(self, event: AstrMessageEvent):
+        """为当前用户绑定设置自定义头像。发送指令时需附带一张图片。"""
+        deny = self._guard_access(event)
+        if deny:
+            yield self._plain(event, "\n".join([self._time_line(), deny]))
+            return
+        if not self._aliases_enabled():
+            yield self._plain(event, "\n".join([self._time_line(), "⚠️ 别名功能已关闭"]))
+            return
+
+        user_id = self._get_user_id(event)
+        if not user_id:
+            yield self._plain(event, "\n".join([self._time_line(), "⚠️ 无法识别当前用户"]))
+            return
+
+        bindings = dict(getattr(self, "_runtime_user_bindings", {}))
+        binding = bindings.get(user_id, "")
+        target = self._get_binding_target(binding)
+        if not target:
+            yield self._plain(
+                event,
+                "\n".join(
+                    [
+                        self._time_line(),
+                        "⚠️ 你还没有绑定 Apex 查询目标",
+                        "请先使用 /apex绑定 <玩家|uid:...|Steam链接> 进行绑定",
+                    ]
+                ),
+            )
+            return
+
+        raw_args = (self._extract_command_args(event) or "").strip()
+        if raw_args.lower() in {"清除", "删除", "移除", "clear", "remove", "del"}:
+            if isinstance(binding, dict):
+                old_path = binding.pop("avatar_path", "")
+                binding.pop("avatar_path", None)
+                bindings[user_id] = binding
+                self._runtime_user_bindings = bindings
+                self._save_settings()
+                # 尝试删除旧头像文件
+                if old_path:
+                    try:
+                        Path(old_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            yield self._plain(
+                event,
+                "\n".join([self._time_line(), "✅ 已清除你的自定义头像"]),
+            )
+            return
+
+        # 从消息中提取图片
+        image_comps = [
+            comp for comp in event.get_messages() if isinstance(comp, Comp.Image)
+        ]
+        if not image_comps:
+            current_avatar = self._get_binding_avatar(binding)
+            if current_avatar:
+                yield self._plain(
+                    event,
+                    "\n".join([self._time_line(), f"🖼️ 你的自定义头像：{current_avatar}"]),
+                )
+            else:
+                yield self._plain(
+                    event,
+                    "\n".join(
+                        [
+                            self._time_line(),
+                            "ℹ️ 你还没有设置自定义头像",
+                            "用法：发送 /apex头像 并附带一张图片即可设置",
+                            "清除：/apex头像 清除",
+                        ]
+                    ),
+                )
+            return
+
+        received_image = image_comps[0]
+        cache_path = self._custom_avatar_cache_path(user_id)
+        try:
+            tmp_path = await received_image.convert_to_file_path()
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(tmp_path, cache_path)
+            if isinstance(binding, dict):
+                binding["avatar_path"] = str(cache_path)
+            else:
+                binding = {"target": str(binding), "avatar_path": str(cache_path)}
+            bindings[user_id] = binding
+            self._runtime_user_bindings = bindings
+            self._save_settings()
+            yield self._plain(
+                event,
+                "\n".join(
+                    [
+                        self._time_line(),
+                        "✅ 已设置你的自定义头像",
+                        f"路径：{cache_path}",
+                    ]
+                ),
+            )
+        except Exception as exc:
+            logger.warning(f"保存自定义头像失败 (user_id={user_id}): {exc}")
+            yield self._plain(
+                event,
+                "\n".join([self._time_line(), f"⚠️ 头像保存失败：{exc}"]),
+            )
 
     @filter.command("apex监控")
     async def apexrankwatch_cn(self, event: AstrMessageEvent, player_name: str = "", platform: str = ""):
@@ -7129,7 +7272,19 @@ class Main(Star):
             logger.warning(f"Apex Rank Watch 字体缓存读取失败：{exc}")
         return None
 
+    def _resolve_bundled_cjk_font_path(self) -> Path | None:
+        """返回插件内置的中文字体路径（assets/fonts/NotoSansCJKsc-Regular.otf）。"""
+        try:
+            if self._FONT_BUNDLED_PATH.exists():
+                return self._FONT_BUNDLED_PATH
+        except Exception:
+            pass
+        return None
+
     def _get_cjk_font_status(self) -> FontStatus:
+        bundled_font = self._resolve_bundled_cjk_font_path()
+        if bundled_font is not None:
+            return FontStatus(True, "bundle", bundled_font)
         system_font = self._resolve_system_cjk_font_path()
         if system_font is not None:
             return FontStatus(True, "system", system_font)
@@ -7169,7 +7324,11 @@ class Main(Star):
     def _build_font_status_lines(self, status: FontStatus) -> list[str]:
         lines = [self._time_line(), "🧩 Apex Rank Watch 中文字体检测"]
         if status.available:
-            source_label = "系统字体" if status.source == "system" else "插件缓存字体"
+            source_label = {
+                "bundle": "本地打包字体",
+                "system": "系统字体",
+                "cache": "插件缓存字体",
+            }.get(status.source, "未知来源")
             lines.append(f"✅ 中文字体已可用，来源：{source_label}")
             if status.path is not None:
                 lines.append(f"路径：{status.path}")
@@ -7188,6 +7347,10 @@ class Main(Star):
         return lines
 
     def _download_cjk_font_if_needed(self, force: bool = False) -> Path | None:
+        bundled = self._resolve_bundled_cjk_font_path()
+        if bundled is not None:
+            return bundled
+
         cached_path = self._resolve_cached_cjk_font_path()
         if cached_path is not None:
             return cached_path
@@ -7237,6 +7400,13 @@ class Main(Star):
             return None
 
     def _font(self, size: int, bold: bool = False):
+        bundled = self._resolve_bundled_cjk_font_path()
+        if bundled is not None:
+            try:
+                return ImageFont.truetype(str(bundled), size=size)
+            except Exception:
+                pass
+
         system_font = self._resolve_system_cjk_font_path(bold=bold)
         if system_font is not None:
             try:

@@ -624,7 +624,7 @@ class ApexApiClient:
                 return {"steam_name": steam_name, "avatar_url": avatar_url}
             return {}
         except Exception as exc:
-            self._logger.debug(f"获取 Steam 资料失败 (steam_id={steam_id}): {exc}")
+            self._logger.warning(f"获取 Steam 资料失败 (steam_id={steam_id}): {exc}")
             return {}
 
     async def fetch_season_info(self, season_number: int | None = None) -> SeasonInfo:
