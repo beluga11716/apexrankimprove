@@ -1,7 +1,7 @@
 name: astrbot_plugin_apexrankwatch
 display_name: Apex Rank Watch
 version: 2.5.0
-author: moeneri (改进: beluga11716)
+author: "moeneri (改进: beluga11716)"
 short_desc: 查询 APEX 段位、地图、赛季、猎杀线，支持 Steam 链接识别、自定义头像、监控、持续记录、分数变化图。
 description: |-
   支持查询 APEX 玩家段位、地图轮换时间、赛季时间和猎杀线，持续监控玩家段位变化并通知，也可持续记录分数变化只记录不通报，并生成最近最多 50 次变化的高清长图。
