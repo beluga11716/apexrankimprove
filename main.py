@@ -330,6 +330,9 @@ class Main(Star):
         self._runtime_user_bindings = self._normalize_user_bindings(
             settings.get("runtime_user_bindings", {}),
         )
+        self._runtime_player_avatars = dict(
+            settings.get("runtime_player_avatars", {})
+        )
         self._store = GroupStore(self._data_dir / "groups.json", logger)
         self._store.load()
         self._migrate_store_keys()
@@ -658,6 +661,7 @@ class Main(Star):
             "season_keyword_disabled_groups": [],
             "runtime_player_aliases": {},
             "runtime_user_bindings": {},
+            "runtime_player_avatars": {},
         }
         if not self._settings_file.exists():
             return defaults
@@ -686,6 +690,9 @@ class Main(Star):
             },
             "runtime_user_bindings": dict(
                 sorted(getattr(self, "_runtime_user_bindings", {}).items())
+            ),
+            "runtime_player_avatars": dict(
+                sorted(getattr(self, "_runtime_player_avatars", {}).items())
             ),
         }
         try:
@@ -1487,6 +1494,21 @@ class Main(Star):
         safe = re.sub(r"[^a-zA-Z0-9_-]", "_", str(binding_identifier).strip())
         return self._avatars_dir() / f"custom_{safe}.png"
 
+    def _player_avatar_cache_path(self, uid: str) -> Path:
+        """全局玩家头像缓存路径（按玩家 UID，管理员设置，所有人可见）。"""
+        safe = re.sub(r"[^a-zA-Z0-9_-]", "_", str(uid).strip())
+        return self._avatars_dir() / f"global_{safe}.png"
+
+    def _apply_player_avatar(self, player_data: ApexPlayerStats) -> None:
+        """根据 player_data.uid 查找管理员设置的全局头像并注入。"""
+        uid = getattr(player_data, "uid", "") or ""
+        if not uid:
+            return
+        avatars = getattr(self, "_runtime_player_avatars", {})
+        avatar_path = avatars.get(uid, "")
+        if avatar_path and Path(avatar_path).exists():
+            player_data.avatar_path = avatar_path
+
     @staticmethod
     def _player_matches_binding_target(
         player_data: ApexPlayerStats, binding_id: str, binding_platform: str
@@ -1926,6 +1948,7 @@ class Main(Star):
         player_data.platform = used_platform
         self._apply_alias_to_player_data(player_data, alias_info)
         self._apply_custom_binding_avatar(event, player_data)
+        self._apply_player_avatar(player_data)
         await self._fetch_and_apply_steam_profile(player_data)
         if self._is_text_output_mode():
             yield self._plain(event, self._format_player_rank_text(player_data))
@@ -3108,130 +3131,103 @@ class Main(Star):
 
     @filter.command("apex头像", alias={"apexavatar"})
     async def apexavatar(self, event: AstrMessageEvent):
-        """为绑定设置自定义头像：/apex头像 [昵称|uid:...] + 附带图片。支持昵称或 UID 指定绑定，头像绑定到具体 UID，查询其他玩家时不会显示。"""
-        deny = self._guard_access(event)
-        if deny:
-            yield self._plain(event, "\n".join([self._time_line(), deny]))
-            return
-        if not self._aliases_enabled():
-            yield self._plain(event, "\n".join([self._time_line(), "⚠️ 别名功能已关闭"]))
-            return
-
+        """管理员设置玩家全局头像：/apex头像 <玩家名|uid:...> + 附带图片。管理员设定后所有人查询该玩家均可看到。"""
         user_id = self._get_user_id(event)
-        if not user_id:
-            yield self._plain(event, "\n".join([self._time_line(), "⚠️ 无法识别当前用户"]))
-            return
-
-        bindings = dict(getattr(self, "_runtime_user_bindings", {}))
-        binding = bindings.get(user_id, "")
-        target = self._get_binding_target(binding)
-        if not target:
+        if not self._is_owner(user_id):
             yield self._plain(
                 event,
-                "\n".join(
-                    [
-                        self._time_line(),
-                        "⚠️ 你还没有绑定 Apex 查询目标",
-                        "请先使用 /apex绑定 <玩家|uid:...|Steam链接> 进行绑定",
-                    ]
-                ),
+                "\n".join([self._time_line(), "⚠️ 此命令仅管理员可用，请在插件配置中设置 owner_qq"]),
             )
             return
 
-        # 解析参数：/apex头像 [昵称] [清除]
+        if not self._config.api_key:
+            yield self._plain(event, "\n".join([self._time_line(), self._missing_api_key_text()]))
+            return
+
         raw_args = (self._extract_command_args(event) or "").strip()
-        action_clear = False
-        nickname_arg = ""
-
-        if raw_args:
-            parts = raw_args.split()
-            if parts[-1].lower() in {"清除", "删除", "移除", "clear", "remove", "del"}:
-                action_clear = True
-                nickname_arg = " ".join(parts[:-1]).strip()
-            else:
-                nickname_arg = raw_args
-
-        # 从绑定 target 提取标识符，用作头像缓存 key
-        identifier, binding_platform = self._parse_alias_target_platform(target)
-        binding_id, _ = self._parse_identifier(identifier)
-
-        # 验证参数是否匹配当前绑定（支持昵称和 UID 两种方式）
-        if nickname_arg:
-            arg_id, arg_is_uid = self._parse_identifier(nickname_arg)
-            binding_nickname = self._get_binding_nickname(binding)
-
-            if arg_is_uid:
-                # UID 模式：比较 UID
-                if arg_id.lower() != binding_id.lower():
-                    yield self._plain(
-                        event,
-                        "\n".join(
-                            [
-                                self._time_line(),
-                                f"⚠️ UID「{nickname_arg}」与你的绑定不匹配",
-                                f"你当前绑定的 UID：{binding_id}",
-                                "用法：/apex头像 uid:你的UID + 附带图片",
-                            ]
-                        ),
-                    )
-                    return
-                binding_display = arg_id
-            else:
-                # 昵称模式：比较昵称
-                if self._normalize_alias_key(nickname_arg) != self._normalize_alias_key(binding_nickname):
-                    yield self._plain(
-                        event,
-                        "\n".join(
-                            [
-                                self._time_line(),
-                                f"⚠️ 昵称「{nickname_arg}」与你的绑定不匹配",
-                                f"你当前绑定的昵称是：{binding_nickname or '(未设置)'}",
-                                "用法：/apex头像 <昵称 或 uid:...> + 附带图片",
-                            ]
-                        ),
-                    )
-                    return
-                binding_display = nickname_arg
-        else:
-            binding_display = self._get_binding_nickname(binding) or binding_id
-
-        # 处理清除操作
-        if action_clear:
-            if isinstance(binding, dict):
-                old_path = binding.pop("avatar_path", "")
-                binding.pop("avatar_path", None)
-                bindings[user_id] = binding
-                self._runtime_user_bindings = bindings
-                self._save_settings()
-                if old_path:
-                    try:
-                        Path(old_path).unlink(missing_ok=True)
-                    except Exception:
-                        pass
+        if not raw_args:
             yield self._plain(
                 event,
                 "\n".join(
                     [
                         self._time_line(),
-                        f"✅ 已清除「{binding_display}」的自定义头像",
+                        "📸 设置玩家全局头像（仅管理员）",
+                        "用法：/apex头像 <玩家名 或 uid:...> + 附带图片",
+                        "查看：/apex头像 <玩家名 或 uid:...>",
+                        "清除：/apex头像 <玩家名 或 uid:...> 清除",
                     ]
                 ),
             )
             return
 
-        # 从消息中提取图片
+        # 解析清除操作
+        parts = raw_args.split()
+        action_clear = parts[-1].lower() in {"清除", "删除", "移除", "clear", "remove", "del"}
+        player_arg = " ".join(parts[:-1]).strip() if action_clear else raw_args
+
+        if not player_arg:
+            yield self._plain(event, "\n".join([self._time_line(), "⚠️ 请提供玩家名或 UID"]))
+            return
+
+        # 通过 API 解析玩家 → 获取 UID
+        identifier, use_uid = self._parse_identifier(player_arg)
+        try:
+            player_data, _used_platform = await self._api.fetch_player_stats_auto(
+                identifier, None, use_uid
+            )
+        except PlayerNotFoundError:
+            yield self._plain(event, "\n".join([self._time_line(), f"⚠️ 未找到玩家：{player_arg}"]))
+            return
+        except ApexApiError as exc:
+            yield self._plain(
+                event,
+                "\n".join([self._time_line(), self._api_request_failed_text("玩家查询", exc)]),
+            )
+            return
+
+        player_uid = getattr(player_data, "uid", "") or ""
+        player_name = getattr(player_data, "name", "") or player_arg
+
+        if not player_uid:
+            yield self._plain(event, "\n".join([self._time_line(), "⚠️ 无法获取该玩家的 UID，请使用 uid: 前缀直接指定"]))
+            return
+
+        avatars = dict(getattr(self, "_runtime_player_avatars", {}))
+
+        # 处理清除
+        if action_clear:
+            old_path = avatars.pop(player_uid, "")
+            self._runtime_player_avatars = avatars
+            self._save_settings()
+            if old_path:
+                try:
+                    Path(old_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+            yield self._plain(
+                event,
+                "\n".join(
+                    [
+                        self._time_line(),
+                        f"✅ 已清除「{player_name}」(UID: {player_uid}) 的全局头像",
+                    ]
+                ),
+            )
+            return
+
+        # 检查是否附带图片
         image_comps = [
             comp for comp in event.get_messages() if isinstance(comp, Comp.Image)
         ]
         if not image_comps:
-            current_avatar = self._get_binding_avatar(binding)
-            if current_avatar:
+            current = avatars.get(player_uid, "")
+            if current:
                 yield self._plain(
                     event,
                     "\n".join(
                         [
                             self._time_line(),
-                            f"🖼️「{binding_display}」的自定义头像：{current_avatar}",
+                            f"🖼️「{player_name}」(UID: {player_uid}) 的全局头像：{current}",
                         ]
                     ),
                 )
@@ -3241,41 +3237,34 @@ class Main(Star):
                     "\n".join(
                         [
                             self._time_line(),
-                            f"ℹ️「{binding_display}」还没有设置自定义头像",
-                            "用法：/apex头像 [昵称 或 uid:...] + 附带一张图片即可设置",
-                            "清除：/apex头像 [昵称 或 uid:...] 清除",
-                            "头像绑定到具体 UID，查询其他玩家不会显示",
+                            f"ℹ️「{player_name}」(UID: {player_uid}) 还没有全局头像",
+                            "请附带一张图片来设置",
+                            "清除：/apex头像 {} 清除".format(player_arg),
                         ]
                     ),
                 )
             return
 
         # 保存头像
-        received_image = image_comps[0]
-        cache_path = self._custom_avatar_cache_path(binding_id)
+        cache_path = self._player_avatar_cache_path(player_uid)
         try:
-            tmp_path = await received_image.convert_to_file_path()
+            tmp_path = await image_comps[0].convert_to_file_path()
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(tmp_path, cache_path)
-            if isinstance(binding, dict):
-                binding["avatar_path"] = str(cache_path)
-            else:
-                binding = {"target": str(binding), "avatar_path": str(cache_path)}
-            bindings[user_id] = binding
-            self._runtime_user_bindings = bindings
+            avatars[player_uid] = str(cache_path)
+            self._runtime_player_avatars = avatars
             self._save_settings()
             yield self._plain(
                 event,
                 "\n".join(
                     [
                         self._time_line(),
-                        f"✅ 已为「{binding_display}」设置自定义头像",
-                        f"UID：{binding_id}",
+                        f"✅ 已为「{player_name}」(UID: {player_uid}) 设置全局头像",
                     ]
                 ),
             )
         except Exception as exc:
-            logger.warning(f"保存自定义头像失败 (user_id={user_id}, target={target}): {exc}")
+            logger.warning(f"保存全局头像失败 (uid={player_uid}): {exc}")
             yield self._plain(
                 event,
                 "\n".join([self._time_line(), f"⚠️ 头像保存失败：{exc}"]),
@@ -3525,6 +3514,7 @@ class Main(Star):
             if player_data is None:
                 continue
             self._apply_record_alias_to_player_data(player_data, player)
+            self._apply_player_avatar(player_data)
 
             new_score = player_data.rank_score
             old_score = player.rank_score
@@ -5372,6 +5362,7 @@ class Main(Star):
             "player",
             "玩家",
             self._player_data_display_name(player_data),
+            avatar_path=getattr(player_data, "avatar_path", "") or "",
         )
         self._draw_rank_info_panel(
             draw,
@@ -5507,18 +5498,27 @@ class Main(Star):
         label: str,
         value: str,
         secondary_value: str = "",
+        avatar_path: str = "",
     ) -> None:
         self._draw_rank_panel_base(draw, box, fill=(13, 16, 21, 240), outline_alpha=105)
         center_x = (box[0] + box[2]) // 2
         icon_box = (center_x - 58, box[1] + 48, center_x + 58, box[1] + 164)
         self._draw_icon_octagon(draw, icon_box)
-        if icon == "player" and self._DEFAULT_USER_AVATAR_PATH.exists():
-            self._draw_image_asset(
-                draw,
-                self._DEFAULT_USER_AVATAR_PATH,
-                icon_box,
-                clip_octagon=True,
-            )
+        if icon == "player":
+            avatar_to_draw = ""
+            if avatar_path and Path(avatar_path).exists():
+                avatar_to_draw = avatar_path
+            elif self._DEFAULT_USER_AVATAR_PATH.exists():
+                avatar_to_draw = str(self._DEFAULT_USER_AVATAR_PATH)
+            if avatar_to_draw:
+                self._draw_image_asset(
+                    draw,
+                    Path(avatar_to_draw),
+                    icon_box,
+                    clip_octagon=True,
+                )
+            else:
+                self._draw_rank_icon(draw, icon, icon_box)
         else:
             self._draw_rank_icon(draw, icon, icon_box)
         label_font = self._font(34, bold=True)
