@@ -1419,6 +1419,19 @@ class Main(Star):
                 pass
         return str(getattr(event, "group_id", "") or "")
 
+    def _resolve_watch_scope(self, event: AstrMessageEvent, watch_mode: str) -> tuple[str, str]:
+        """解析监控 scope：群聊用 group_id，私聊 RECORD 用 "pm:{user_id}"，私聊 NOTIFY 拒绝。
+        返回 (group_id_or_empty, error_msg_or_empty)。"""
+        group_id = self._get_group_id(event)
+        if group_id:
+            return group_id, ""
+        if watch_mode == WATCH_MODE_RECORD:
+            user_id = self._get_user_id(event)
+            if not user_id:
+                return "", "⚠️ 无法识别当前用户"
+            return f"pm:{user_id}", ""
+        return "", "⚠️ 持续视奸（通报模式）仅适用于群聊；私聊请使用 /持续记录（只记录不通报）"
+
     async def _send_active_message(self, origin: str, message: str) -> bool:
         if not origin:
             logger.warning("会话标识缺失，无法发送通知")
@@ -2280,10 +2293,10 @@ class Main(Star):
         platform: str = "",
         watch_mode: str = WATCH_MODE_NOTIFY,
     ):
-        """将玩家加入本群排位分数持续监控。"""
+        """将玩家加入排位分数持续监控。私聊仅支持记录模式，通报模式仍需群聊。"""
         watch_mode = normalize_watch_mode(watch_mode)
         watch_label = self._watch_mode_label(watch_mode)
-        deny = self._guard_access(event, require_group=True)
+        deny = self._guard_access(event, require_group=(watch_mode != WATCH_MODE_RECORD))
         if deny:
             yield self._plain(event, "\n".join([self._time_line(), deny]))
             return
@@ -2299,12 +2312,11 @@ class Main(Star):
             )
             return
 
-        group_id = self._get_group_id(event)
+        group_id, scope_error = self._resolve_watch_scope(event, watch_mode)
         if not group_id:
-            yield self._plain(event, 
-                "\n".join([self._time_line(), "⚠️ 此命令仅适用于群聊，请在群聊中使用"])
-            )
+            yield self._plain(event, "\n".join([self._time_line(), scope_error]))
             return
+        is_private = group_id.startswith("pm:")
 
         blocked_name = self._blocked_lookup_name(requested_player_name, player_name)
         if blocked_name:
@@ -2388,7 +2400,7 @@ class Main(Star):
                     ),
                 )
                 return
-            yield self._plain(event, f"本群已经在监控 {display_name} 的排名变化了（{watch_label}）")
+            yield self._plain(event, f"已经在记录 {display_name} 的排名变化了（{watch_label}）")
             return
 
         record = PlayerRecord(
@@ -2444,26 +2456,32 @@ class Main(Star):
 
     @filter.command("apexranklist")
     async def apexranklist(self, event: AstrMessageEvent):
-        """查看本群正在监控的 Apex 玩家列表。"""
-        deny = self._guard_access(event, require_group=True)
+        """查看本群/私人正在监控的 Apex 玩家列表。"""
+        deny = self._guard_access(event)
         if deny:
             yield self._plain(event, "\n".join([self._time_line(), deny]))
             return
 
         group_id = self._get_group_id(event)
+        is_private = False
         if not group_id:
-            yield self._plain(event, 
-                "\n".join([self._time_line(), "⚠️ 此命令仅适用于群聊，请在群聊中使用"])
-            )
-            return
+            user_id = self._get_user_id(event)
+            if not user_id:
+                yield self._plain(event,
+                    "\n".join([self._time_line(), "⚠️ 无法识别当前用户"])
+                )
+                return
+            group_id = f"pm:{user_id}"
+            is_private = True
 
         group = self._store.get_group(group_id)
         if group and event.unified_msg_origin and group.origin != event.unified_msg_origin:
             group.origin = event.unified_msg_origin
             self._store.save()
+        scope_label = "你的私人记录" if is_private else "本群"
         if not group or not group.players:
-            yield self._plain(event, 
-                "\n".join([self._time_line(), "ℹ️ 本群目前没有监控任何玩家的排名"])
+            yield self._plain(event,
+                "\n".join([self._time_line(), f"ℹ️ {scope_label}目前没有监控任何玩家的排名"])
             )
             return
 
@@ -2480,31 +2498,35 @@ class Main(Star):
 
     @filter.command("分数变化", alias={"apex分数变化", "分数图"})
     async def apex_score_changes(self, event: AstrMessageEvent, raw_args: str = ""):
-        """生成本群持续视奸和持续记录玩家的分数变化高清长图。"""
-        deny = self._guard_access(event, require_group=True)
+        """生成本群/私人持续视奸和持续记录玩家的分数变化高清长图。"""
+        deny = self._guard_access(event)
         if deny:
             yield self._plain(event, "\n".join([self._time_line(), deny]))
             return
 
         group_id = self._get_group_id(event)
         if not group_id:
-            yield self._plain(
-                event,
-                "\n".join([self._time_line(), "⚠️ 此命令仅适用于群聊，请在群聊中使用"]),
-            )
-            return
+            user_id = self._get_user_id(event)
+            if not user_id:
+                yield self._plain(
+                    event,
+                    "\n".join([self._time_line(), "⚠️ 无法识别当前用户"]),
+                )
+                return
+            group_id = f"pm:{user_id}"
 
         group = self._store.get_group(group_id)
         if group and event.unified_msg_origin and group.origin != event.unified_msg_origin:
             group.origin = event.unified_msg_origin
             self._store.save()
         if not group or not group.players:
+            scope_label = "你的私人记录" if group_id.startswith("pm:") else "本群"
             yield self._plain(
                 event,
                 "\n".join(
                     [
                         self._time_line(),
-                        "ℹ️ 本群暂无统计玩家，请先使用 /持续视奸 或 /持续记录 添加玩家",
+                        f"ℹ️ {scope_label}暂无统计玩家，请先使用 /持续视奸 或 /持续记录 添加玩家",
                     ]
                 ),
             )
@@ -2536,8 +2558,8 @@ class Main(Star):
 
     @filter.command("apexrankremove")
     async def apexrankremove(self, event: AstrMessageEvent, player_name: str = "", platform: str = ""):
-        """从本群移除指定玩家的排位监控。"""
-        deny = self._guard_access(event, require_group=True)
+        """从本群/私人移除指定玩家的排位监控。"""
+        deny = self._guard_access(event)
         if deny:
             yield self._plain(event, "\n".join([self._time_line(), deny]))
             return
@@ -2550,7 +2572,7 @@ class Main(Star):
             player_name,
         )
         if not player_name:
-            yield self._plain(event, 
+            yield self._plain(event,
                 "\n".join(
                     [self._time_line(), "⚠️ 请提供要移除监控的玩家名称，例如: /apexrankremove PlayerName"]
                 )
@@ -2558,11 +2580,16 @@ class Main(Star):
             return
 
         group_id = self._get_group_id(event)
+        is_private = False
         if not group_id:
-            yield self._plain(event, 
-                "\n".join([self._time_line(), "⚠️ 此命令仅适用于群聊，请在群聊中使用"])
-            )
-            return
+            user_id = self._get_user_id(event)
+            if not user_id:
+                yield self._plain(event,
+                    "\n".join([self._time_line(), "⚠️ 无法识别当前用户"]),
+                )
+                return
+            group_id = f"pm:{user_id}"
+            is_private = True
         identifier, use_uid = self._parse_identifier(player_name)
         if not identifier:
             yield self._plain(
@@ -2575,10 +2602,11 @@ class Main(Star):
         if group and event.unified_msg_origin and group.origin != event.unified_msg_origin:
             group.origin = event.unified_msg_origin
             self._store.save()
+        scope_label = "你的私人记录" if is_private else "本群"
         if not group:
-            yield self._plain(event, 
+            yield self._plain(event,
                 "\n".join(
-                    [self._time_line(), f"ℹ️ 本群没有监控 {display_name} 的排名"]
+                    [self._time_line(), f"ℹ️ {scope_label}没有监控 {display_name} 的排名"]
                 )
             )
             return
@@ -2586,7 +2614,7 @@ class Main(Star):
         lookup_name = f"uid:{identifier}" if use_uid else identifier
         player_key = self._find_player_key(group, lookup_name, platform, use_uid)
         if player_key == "__MULTI__":
-            yield self._plain(event, 
+            yield self._plain(event,
                 "\n".join(
                     [
                         self._time_line(),
@@ -2596,16 +2624,16 @@ class Main(Star):
             )
             return
         if not player_key or not self._store.remove_player(group_id, player_key):
-            yield self._plain(event, 
+            yield self._plain(event,
                 "\n".join(
-                    [self._time_line(), f"ℹ️ 本群没有监控 {display_name} 的排名"]
+                    [self._time_line(), f"ℹ️ {scope_label}没有监控 {display_name} 的排名"]
                 )
             )
             return
 
         self._store.save()
-        yield self._plain(event, 
-            "\n".join([self._time_line(), f"✅ 已移除本群对 {display_name} 的排名监控"])
+        yield self._plain(event,
+            "\n".join([self._time_line(), f"✅ 已移除对 {display_name} 的排名监控"])
         )
 
     @filter.command("apexblacklist")
@@ -4194,7 +4222,7 @@ class Main(Star):
 
     def _build_rank_watch_list_lines(self, players_iter) -> list[str]:
         players = list(players_iter)
-        response_lines = [self._time_line(), "📋 本群 Apex 排名监控列表"]
+        response_lines = [self._time_line(), "📋 Apex 排名监控列表"]
         for index, player in enumerate(players, start=1):
             rank_display = self._record_rank_display(player)
             platform = getattr(player, "platform", "PC") or "PC"

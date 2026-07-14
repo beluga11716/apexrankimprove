@@ -1039,7 +1039,7 @@ def test_remove_watch_commands_use_configured_alias_target(monkeypatch, message,
     assert result[0][0] == "plain"
     assert store.removed == [("group-1", "uid:1007669673322@PC")]
     assert store.save_calls == 1
-    assert "已移除本群对 测试（uid:1007669673322） 的排名监控" in result[0][1]
+    assert "已移除对 测试（uid:1007669673322） 的排名监控" in result[0][1]
 
 
 def test_rank_watch_list_prefers_alias_display_name():
